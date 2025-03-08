@@ -1,0 +1,570 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Galactic Odyssey: Saga of the Stars</title>
+  <style>
+    /* =============================================================================
+       Basic CSS Styles and UI Overlay Setup 
+       ============================================================================= */
+    body {
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      background: #000;
+    }
+    canvas {
+      display: block;
+      background: #000;
+    }
+    #uiOverlay {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      color: white;
+      font-family: 'Courier New', monospace;
+      pointer-events: none;
+    }
+    .dialogueBox {
+      position: absolute;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 80%;
+      background: rgba(0, 0, 0, 0.7);
+      border: 2px solid #fff;
+      padding: 15px;
+      font-size: 18px;
+      pointer-events: auto;
+    }
+    .optionButton {
+      display: inline-block;
+      margin: 5px;
+      padding: 10px 15px;
+      background: #444;
+      color: #fff;
+      border: 1px solid #fff;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="gameCanvas"></canvas>
+  <div id="uiOverlay"></div>
+  
+  <script>
+    "use strict";
+    
+    // =============================================================================
+    // GLOBAL VARIABLES AND INITIAL SETUP
+    // =============================================================================
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+    let width = canvas.width;
+    let height = canvas.height;
+    let lastTime = performance.now();
+    let delta = 0;
+    let cameraX = 0, cameraY = 0;
+    let shakeDuration = 0;
+    let shakeMagnitude = 0;
+    const STATE_INTRO = 0;
+    const STATE_CUTSCENE = 1;
+    const STATE_GAMEPLAY = 2;
+    const STATE_DIALOGUE = 3;
+    const STATE_GAMEOVER = 4;
+    const STATE_VICTORY = 5;
+    let gameState = STATE_INTRO;
+    let currentDialogue = '';
+    let dialogueOptions = [];
+    let showDialogue = false;
+    let dialogueCallback = null;
+    let gameScore = 0;
+    let player;
+    let keys = {};
+    document.addEventListener('keydown', (e) => { keys[e.key] = true; });
+    document.addEventListener('keyup', (e) => { keys[e.key] = false; });
+    
+    // =============================================================================
+    // UTILITY FUNCTIONS
+    // =============================================================================
+    function clamp(val, min, max) {
+      return Math.max(min, Math.min(max, val));
+    }
+    
+    function randomRange(min, max) {
+      return Math.random() * (max - min) + min;
+    }
+    
+    // =============================================================================
+    // ASSET MANAGEMENT
+    // =============================================================================
+    let assets = {};
+    function loadAssets(callback) {
+      let loaded = 0;
+      let toLoad = 7;
+      function checkDone() { loaded++; if (loaded >= toLoad) { callback(); } }
+      assets.spaceBackground = new Image();
+      assets.spaceBackground.src = 'path-to-high-res-bg.png';
+      assets.spaceBackground.onload = checkDone;
+      assets.planet1 = new Image();
+      assets.planet1.src = 'path-to-planet1.png';
+      assets.planet1.onload = checkDone;
+      assets.planet2 = new Image();
+      assets.planet2.src = 'path-to-planet2.png';
+      assets.planet2.onload = checkDone;
+      assets.ship = new Image();
+      assets.ship.src = 'path-to-ship.png';
+      assets.ship.onload = checkDone;
+      assets.enemyShip = new Image();
+      assets.enemyShip.src = 'path-to-enemyship.png';
+      assets.enemyShip.onload = checkDone;
+      assets.explosion = new Image();
+      assets.explosion.src = 'path-to-explosion.png';
+      assets.explosion.onload = checkDone;
+      assets.cutsceneImage = new Image();
+      assets.cutsceneImage.src = 'path-to-cutscene.png';
+      assets.cutsceneImage.onload = checkDone;
+    }
+    
+    // =============================================================================
+    // PARTICLE SYSTEM FOR EXPLOSIONS, THRUST, ETC.
+    // =============================================================================
+    class Particle {
+      constructor(x, y, vx, vy, life, color, size) {
+        this.x = x;
+        this.y = y;
+        this.vx = vx;
+        this.vy = vy;
+        this.life = life;
+        this.maxLife = life;
+        this.color = color;
+        this.size = size;
+      }
+      update(dt) {
+        this.x += this.vx * dt;
+        this.y += this.vy * dt;
+        this.life -= dt;
+      }
+      draw(ctx) {
+        if (this.life > 0) {
+          ctx.save();
+          let alpha = clamp(this.life / this.maxLife, 0, 1);
+          ctx.globalAlpha = alpha;
+          ctx.fillStyle = this.color;
+          ctx.beginPath();
+          ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
+        }
+      }
+    }
+    
+    // Particle system container
+    let particles = [];
+    function spawnExplosion(x, y, count) {
+      for (let i = 0; i < count; i++) {
+        let angle = randomRange(0, Math.PI * 2);
+        let speed = randomRange(50, 200);
+        let vx = Math.cos(angle) * speed;
+        let vy = Math.sin(angle) * speed;
+        let life = randomRange(0.5, 1.5);
+        particles.push(new Particle(x, y, vx, vy, life, 'orange', randomRange(2, 4)));
+      }
+    }
+    
+    // =============================================================================
+    // ENTITY CLASSES
+    // =============================================================================
+    class Entity {
+      constructor(x, y, sprite) {
+        this.x = x;
+        this.y = y;
+        this.vx = 0;
+        this.vy = 0;
+        this.sprite = sprite;
+        this.width = sprite ? sprite.width : 50;
+        this.height = sprite ? sprite.height : 50;
+        this.angle = 0;
+        this.alive = true;
+      }
+      update(dt) {
+        this.x += this.vx * dt;
+        this.y += this.vy * dt;
+      }
+      draw(ctx) {
+        if (!this.alive) return;
+        ctx.save();
+        ctx.translate(this.x - cameraX, this.y - cameraY);
+        ctx.rotate(this.angle);
+        if (this.sprite) {
+          ctx.drawImage(this.sprite, -this.width / 2, -this.height / 2, this.width, this.height);
+        } else {
+          ctx.fillStyle = 'white';
+          ctx.fillRect(-this.width / 2, -this.height / 2, this.width, this.height);
+        }
+        ctx.restore();
+      }
+    }
+    
+    // Player spaceship extending entity
+    class SpaceShip extends Entity {
+      constructor(x, y, sprite) {
+        super(x, y, sprite);
+        this.thrust = 300;
+        this.rotationSpeed = 3;
+        this.health = 100;
+      }
+      update(dt) {
+        // Movement controls: arrow keys to control thrust and rotation
+        if (keys["ArrowLeft"]) {
+          this.angle -= this.rotationSpeed * dt;
+        }
+        if (keys["ArrowRight"]) {
+          this.angle += this.rotationSpeed * dt;
+        }
+        if (keys["ArrowUp"]) {
+          // Applying thrust in direction of angle
+          this.vx += Math.cos(this.angle) * this.thrust * dt;
+          this.vy += Math.sin(this.angle) * this.thrust * dt;
+          // Spawn particles to simulate thrust
+          let tx = this.x - Math.cos(this.angle) * this.width / 2;
+          let ty = this.y - Math.sin(this.angle) * this.height / 2;
+          particles.push(new Particle(tx, ty, -Math.cos(this.angle) * randomRange(100, 200), -Math.sin(this.angle) * randomRange(100, 200), 0.5, 'cyan', 3));
+        }
+        // Apply friction / drag
+        this.vx *= 0.99;
+        this.vy *= 0.99;
+        super.update(dt);
+      }
+    }
+    
+    // Enemy spaceship
+    class EnemyShip extends Entity {
+      constructor(x, y, sprite) {
+        super(x, y, sprite);
+        this.health = 50;
+      }
+      update(dt) {
+        // Simple AI: move slowly downward, adjust direction randomly
+        this.vy = 50;
+        this.vx += randomRange(-10, 10) * dt;
+        super.update(dt);
+      }
+    }
+    
+    // =============================================================================
+    // BACKGROUND AND SCENERY CLASSES
+    // =============================================================================
+    class Background {
+      constructor(image, speed) {
+        this.image = image;
+        this.speed = speed;
+        this.offset = 0;
+class Background {
+  constructor(image, speed) {
+    this.image = image;
+    this.speed = speed;
+    this.offset = 0;
+  }
+  update(dt) {
+    // Move in relation to camera movement for a parallax effect
+    this.offset += this.speed * dt;
+    if (this.offset > this.image.height) {
+      this.offset = 0;
+    }
+  }
+  draw(ctx) {
+    let imgHeight = this.image.height;
+    let imgWidth = this.image.width;
+    // Draw multiple images to fill the canvas
+    for (let y = -imgHeight + this.offset; y < height; y += imgHeight) {
+      for (let x = 0; x < width; x += imgWidth) {
+        ctx.drawImage(this.image, x, y, imgWidth, imgHeight);
+      }
+    }
+  }
+}
+let background;
+
+// =============================================================================
+// CUTSCENES & DIALOGUE SYSTEM
+// =============================================================================
+let cutsceneIndex = 0;
+let cutscenes = [
+  {
+    image: assets.cutsceneImage,
+    text: "In the distant reaches of the galaxy, a prophecy foretold an odyssey of cosmic significance...",
+    duration: 5000 // milliseconds
+  },
+  {
+    image: assets.cutsceneImage,
+    text: "A brave pilot, chosen by fate, embarks on the journey to restore balance to the celestial realms...",
+    duration: 5000
+  },
+  {
+    image: assets.cutsceneImage,
+    text: "Dark forces gather as ancient empires awaken. The war for the stars has begun.",
+    duration: 5000
+  }
+];
+let cutsceneTimer = 0;
+
+// Dialogue system for choices
+function showDialogueWindow(text, options, callback) {
+  showDialogue = true;
+  currentDialogue = text;
+  dialogueOptions = options;
+  dialogueCallback = callback;
+  // Render dialogue as HTML overlay
+  const uiOverlay = document.getElementById('uiOverlay');
+  uiOverlay.innerHTML =
+    '<div class="dialogueBox" id="dialogueBox">' +
+    '<div id="dialogueText">' + text + '</div>' +
+    '<div id="dialogueOptions"></div></div>';
+  const optionsDiv = document.getElementById('dialogueOptions');
+  options.forEach((opt, index) => {
+    let button = document.createElement('div');
+    button.className = 'optionButton';
+    button.innerText = opt;
+    button.onclick = () => {
+      showDialogue = false;
+      uiOverlay.innerHTML = '';
+      if (dialogueCallback) {
+        dialogueCallback(index);
+      }
+    };
+    optionsDiv.appendChild(button);
+  });
+}
+
+// =============================================================================
+// CAMERA SHAKE SYSTEM
+// =============================================================================
+function applyCameraShake(dt) {
+  if (shakeDuration > 0) {
+    shakeDuration -= dt;
+    cameraX = randomRange(-shakeMagnitude, shakeMagnitude);
+    cameraY = randomRange(-shakeMagnitude, shakeMagnitude);
+  } else {
+    cameraX = 0;
+    cameraY = 0;
+  }
+}
+function triggerShake(duration, magnitude) {
+  shakeDuration = duration;
+  shakeMagnitude = magnitude;
+}
+
+// =============================================================================
+// GAMEPLAY ENTITIES MANAGER
+// =============================================================================
+let enemies = [];
+function spawnEnemy() {
+  let x = randomRange(50, width - 50);
+  let y = -50;
+  enemies.push(new EnemyShip(x, y, assets.enemyShip));
+}
+
+// =============================================================================
+// GAME INITIALIZATION
+// =============================================================================
+function initGame() {
+  player = new SpaceShip(width / 2, height - 100, assets.ship);
+  background = new Background(assets.spaceBackground, 20);
+  // Spawn some initial enemies
+  for (let i = 0; i < 5; i++) {
+    spawnEnemy();
+  }
+  gameState = STATE_INTRO;
+}
+
+// =============================================================================
+// MAIN GAME LOOP
+// =============================================================================
+function gameLoop(timestamp) {
+  delta = (timestamp - lastTime) / 1000;
+  lastTime = timestamp;
+  update(delta);
+  draw();
+  requestAnimationFrame(gameLoop);
+}
+
+// =============================================================================
+// UPDATE FUNCTION
+// =============================================================================
+function update(dt) {
+  applyCameraShake(dt);
+  // Update background
+  background.update(dt);
+
+  // Update particles
+  for (let i = particles.length - 1; i >= 0; i--) {
+    particles[i].update(dt);
+    if (particles[i].life <= 0) {
+      particles.splice(i, 1);
+    }
+  }
+
+  // Update based on game state
+  switch (gameState) {
+    case STATE_INTRO:
+      // Intro cutscene sequence
+      if (cutsceneIndex < cutscenes.length) {
+        cutsceneTimer += dt * 1000;
+        if (cutsceneTimer >= cutscenes[cutsceneIndex].duration) {
+          cutsceneTimer = 0;
+          cutsceneIndex++;
+        }
+      } else {
+        // After intro, show dialogue for choice
+        gameState = STATE_DIALOGUE;
+        showDialogueWindow("Do you accept the call to adventure?", ["Yes", "No"], (choice) => {
+          if (choice === 0) {
+            gameState = STATE_GAMEPLAY;
+          } else {
+            // If no, repeat dialogue
+            showDialogueWindow("Will you reconsider? The galaxy depends on you!", ["Yes", "No"], (c) => {
+              if (c === 0) {
+                gameState = STATE_GAMEPLAY;
+              } else {
+                gameState = STATE_GAMEOVER;
+              }
+            });
+          }
+        });
+      }
+      break;
+    case STATE_GAMEPLAY:
+      player.update(dt);
+      // Boundaries for player
+      player.x = clamp(player.x, 0, width);
+      player.y = clamp(player.y, 0, height);
+
+      // Update enemies
+      enemies.forEach(enemy => enemy.update(dt));
+      // Collision detection between player and enemy
+      enemies.forEach(enemy => {
+        let dx = player.x - enemy.x;
+        let dy = player.y - enemy.y;
+        let distance = Math.sqrt(dx * dx + dy * dy);
+        if (distance < 40) {
+          spawnExplosion(player.x, player.y, 20);
+          triggerShake(0.5, 10);
+          player.health -= 20;
+          enemy.alive = false;
+        }
+      });
+      // Remove dead enemies and spawn new ones periodically
+      enemies = enemies.filter(e => e.alive && e.y < height + 100);
+      if (Math.random() < 0.02) {
+        spawnEnemy();
+      }
+      if (player.health <= 0) {
+        gameState = STATE_GAMEOVER;
+      }
+      break;
+    case STATE_GAMEOVER:
+      // Game over: no update for player, but still update particles and background
+      break;
+    case STATE_VICTORY:
+      // Victory state
+      break;
+  }
+}
+
+// =============================================================================
+// DRAW FUNCTION
+// =============================================================================
+function draw() {
+  // Clear canvas
+  ctx.clearRect(0, 0, width, height);
+  // Draw background
+  background.draw(ctx);
+
+  // Draw cutscene if in intro state
+  if (gameState === STATE_INTRO && cutsceneIndex < cutscenes.length) {
+    ctx.save();
+    ctx.globalAlpha = 0.8;
+    ctx.drawImage(cutscenes[cutsceneIndex].image, width / 2 - 400, height / 2 - 300, 800, 600);
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = 'white';
+    ctx.font = '24px Courier New';
+    ctx.textAlign = 'center';
+    ctx.fillText(cutscenes[cutsceneIndex].text, width / 2, height / 2 + 350);
+    ctx.restore();
+  }
+
+  // Draw gameplay scene
+  if (gameState === STATE_GAMEPLAY) {
+    player.draw(ctx);
+    enemies.forEach(enemy => enemy.draw(ctx));
+  }
+
+  // Draw particles
+  particles.forEach(p => p.draw(ctx));
+
+  // Draw UI overlay for gameplay
+  if (gameState === STATE_GAMEPLAY) {
+    ctx.save();
+    ctx.fillStyle = 'white';
+    ctx.font = '20px Courier New';
+    ctx.fillText("Health: " + player.health, 20, 30);
+    ctx.fillText("Score: " + gameScore, 20, 60);
+    ctx.restore();
+  }
+
+  // Game Over overlay
+  if (gameState === STATE_GAMEOVER) {
+    ctx.save();
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
+    ctx.fillRect(0, 0, width, height);
+    ctx.fillStyle = 'red';
+    ctx.font = '48px Courier New';
+    ctx.textAlign = 'center';
+    ctx.fillText("GAME OVER", width / 2, height / 2);
+    ctx.restore();
+  }
+
+  // Victory overlay
+  if (gameState === STATE_VICTORY) {
+    ctx.save();
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
+    ctx.fillRect(0, 0, width, height);
+    ctx.fillStyle = 'yellow';
+    ctx.font = '48px Courier New';
+    ctx.textAlign = 'center';
+    ctx.fillText("VICTORY!", width / 2, height / 2);
+    ctx.restore();
+  }
+}
+
+// =============================================================================
+// EVENT LISTENERS FOR RESIZE
+// =============================================================================
+window.addEventListener('resize', () => {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+  width = canvas.width
+window.addEventListener('resize', () => {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+  width = canvas.width;
+  height = canvas.height;
+});
+
+// =============================================================================
+// MAIN ENTRY POINT
+// =============================================================================
+loadAssets(() => {
+  initGame();
+  lastTime = performance.now();
+  requestAnimationFrame(gameLoop);
+});
+
+</script>
+</body>
+</html>
